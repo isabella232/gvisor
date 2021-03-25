@@ -23,6 +23,7 @@ import (
 	"sync"
 	"testing"
 
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -255,4 +256,49 @@ func TestICMPv6Checksum(t *testing.T) {
 			PayloadLen:  vv.Size(),
 		})
 	}, want, fmt.Sprintf("header: {% x} data {% x}", h, vv.ToView()))
+}
+
+func TestChecksumUpdateUint16(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		a := uint16(rand.Uint32())
+		b := uint16(rand.Uint32())
+		c := uint16(rand.Uint32())
+
+		origXSum := header.ChecksumCombine(a, b)
+		if got, want := header.ChecksumUpdateUint16(origXSum, b, c), header.ChecksumCombine(a, c); got != want {
+			t.Errorf("got ChecksumUpdateUint16(ChecksumCombine(%d, %d), %d, %d) = %d, want = %d", a, b, b, c, got, want)
+		}
+	}
+}
+
+func TestChecksumUpdateAddress(t *testing.T) {
+	const (
+		bufLen      = 10
+		oldStartIdx = 2
+		replaceLen  = 6
+	)
+
+	for i := 0; i < 1000; i++ {
+		var origBytes [bufLen]byte
+		if n, err := rand.Read(origBytes[:]); err != nil {
+			t.Fatalf("rand.Read(_): %s", err)
+		} else if n != len(origBytes) {
+			t.Fatalf("got rand.Read(_) = %d, want = %d", n, len(origBytes))
+		}
+
+		newBytes := origBytes
+		addedBytes := newBytes[oldStartIdx:][:replaceLen]
+		if n, err := rand.Read(addedBytes); err != nil {
+			t.Fatalf("rand.Read(_): %s", err)
+		} else if n != len(addedBytes) {
+			t.Fatalf("got rand.Read(_) = %d, want = %d", n, len(addedBytes))
+		}
+
+		removedAddr := tcpip.Address(origBytes[oldStartIdx:][:replaceLen])
+		addedAddr := tcpip.Address(addedBytes)
+		origXSum := header.Checksum(origBytes[:], 0)
+		if got, want := header.ChecksumUpdateAddress(origXSum, removedAddr, addedAddr), header.Checksum(newBytes[:], 0); got != want {
+			t.Errorf("got ChecksumUpdateAddress(Checksum(0x%x), %q, %q) = %d, want = %d", origBytes, removedAddr, addedAddr, got, want)
+		}
+	}
 }

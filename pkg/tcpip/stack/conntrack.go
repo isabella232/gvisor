@@ -370,7 +370,7 @@ func (ct *ConnTrack) insertConn(conn *conn) {
 // handlePacket will manipulate the port and address of the packet if the
 // connection exists. Returns whether, after the packet traverses the tables,
 // it should create a new entry in the table.
-func (ct *ConnTrack) handlePacket(pkt *PacketBuffer, hook Hook, r *Route) bool {
+func (ct *ConnTrack) handlePacket(pkt *PacketBuffer, hook Hook) bool {
 	if pkt.NatDone {
 		return false
 	}
@@ -405,14 +405,29 @@ func (ct *ConnTrack) handlePacket(pkt *PacketBuffer, hook Hook, r *Route) bool {
 	// validated if checksum offloading is off. It may require IP defrag if the
 	// packets are fragmented.
 
+	var oldAddr, newAddr tcpip.Address
+	var oldPort, newPort uint16
+
 	switch hook {
 	case Prerouting, Output:
 		if conn.manip == manipDestination {
 			switch dir {
 			case dirOriginal:
+				oldPort = tcpHeader.DestinationPort()
+				newPort = conn.reply.srcPort
+
+				oldAddr = netHeader.DestinationAddress()
+				newAddr = conn.reply.srcAddr
+
 				tcpHeader.SetDestinationPort(conn.reply.srcPort)
 				netHeader.SetDestinationAddress(conn.reply.srcAddr)
 			case dirReply:
+				oldPort = tcpHeader.SourcePort()
+				newPort = conn.original.dstPort
+
+				oldAddr = netHeader.SourceAddress()
+				newAddr = conn.original.dstAddr
+
 				tcpHeader.SetSourcePort(conn.original.dstPort)
 				netHeader.SetSourceAddress(conn.original.dstAddr)
 			}
@@ -422,9 +437,21 @@ func (ct *ConnTrack) handlePacket(pkt *PacketBuffer, hook Hook, r *Route) bool {
 		if conn.manip == manipSource {
 			switch dir {
 			case dirOriginal:
+				oldPort = tcpHeader.SourcePort()
+				newPort = conn.reply.dstPort
+
+				oldAddr = netHeader.SourceAddress()
+				newAddr = conn.reply.dstAddr
+
 				tcpHeader.SetSourcePort(conn.reply.dstPort)
 				netHeader.SetSourceAddress(conn.reply.dstAddr)
 			case dirReply:
+				oldPort = tcpHeader.DestinationPort()
+				newPort = conn.original.srcPort
+
+				oldAddr = netHeader.DestinationAddress()
+				newAddr = conn.original.srcAddr
+
 				tcpHeader.SetDestinationPort(conn.original.srcPort)
 				netHeader.SetDestinationAddress(conn.original.srcAddr)
 			}
@@ -441,14 +468,24 @@ func (ct *ConnTrack) handlePacket(pkt *PacketBuffer, hook Hook, r *Route) bool {
 	case Prerouting, Input:
 	case Output, Postrouting:
 		// Calculate the TCP checksum and set it.
-		tcpHeader.SetChecksum(0)
-		length := uint16(len(tcpHeader) + pkt.Data().Size())
-		xsum := header.PseudoHeaderChecksum(header.TCPProtocolNumber, netHeader.SourceAddress(), netHeader.DestinationAddress(), length)
-		if pkt.GSOOptions.Type != GSONone && pkt.GSOOptions.NeedsCsum {
-			tcpHeader.SetChecksum(xsum)
-		} else if r.RequiresTXTransportChecksum() {
-			xsum = header.ChecksumCombine(xsum, pkt.Data().AsRange().Checksum())
-			tcpHeader.SetChecksum(^tcpHeader.CalculateChecksum(xsum))
+		switch pkt.TransportChecksumStatus {
+		case TransportChecksumNone:
+		case TransportChecksumNotNeeded:
+			tcpHeader.SetChecksum(0)
+		case TransportChecksumPartial:
+			tcpHeader.SetChecksum(header.ChecksumUpdateAddress(tcpHeader.Checksum(), oldAddr, newAddr))
+		case TransportChecksumCalculated:
+			tcpHeader.SetChecksum(^header.ChecksumUpdateAddress(
+				header.ChecksumUpdateUint16(
+					^tcpHeader.Checksum(),
+					oldPort,
+					newPort,
+				),
+				oldAddr,
+				newAddr,
+			))
+		default:
+			panic(fmt.Sprintf("unhandled TransportChecksumStatus = %d", pkt.TransportChecksumStatus))
 		}
 	default:
 		panic(fmt.Sprintf("unrecognized hook = %s", hook))
@@ -457,8 +494,7 @@ func (ct *ConnTrack) handlePacket(pkt *PacketBuffer, hook Hook, r *Route) bool {
 	// After modification, IPv4 packets need a valid checksum.
 	if pkt.NetworkProtocolNumber == header.IPv4ProtocolNumber {
 		netHeader := header.IPv4(pkt.NetworkHeader().View())
-		netHeader.SetChecksum(0)
-		netHeader.SetChecksum(^netHeader.CalculateChecksum())
+		netHeader.SetChecksum(^header.ChecksumUpdateAddress(^netHeader.Checksum(), oldAddr, newAddr))
 	}
 
 	// Update the state of tcb.
