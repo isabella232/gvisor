@@ -3177,6 +3177,18 @@ cc_binary(
 )
 
 cc_binary(
+    name = "socket_inet_loopback_timewait_test",
+    testonly = 1,
+    srcs = ["socket_inet_loopback_timewait.cc"],
+    linkstatic = 1,
+    deps = [
+        ":socket_test_util",
+        gtest,
+        "//test/util:test_main",
+    ],
+)
+
+cc_binary(
     name = "socket_netlink_test",
     testonly = 1,
     srcs = ["socket_netlink.cc"],

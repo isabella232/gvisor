@@ -564,6 +564,59 @@ inline sockaddr* AsSockAddr(sockaddr_un* s) {
   return reinterpret_cast<sockaddr*>(s);
 }
 
+struct SocketInetTestParam {
+  TestAddress listener;
+  TestAddress connector;
+};
+
+std::string DescribeSocketInetTestParam(
+    ::testing::TestParamInfo<SocketInetTestParam> const& info);
+
+inline auto SocketInetLoopbackTestValues() {
+  return ::testing::Values(
+      // Listeners bound to IPv4 addresses refuse connections using IPv6
+      // addresses.
+      SocketInetTestParam{V4Any(), V4Any()},
+      SocketInetTestParam{V4Any(), V4Loopback()},
+      SocketInetTestParam{V4Any(), V4MappedAny()},
+      SocketInetTestParam{V4Any(), V4MappedLoopback()},
+      SocketInetTestParam{V4Loopback(), V4Any()},
+      SocketInetTestParam{V4Loopback(), V4Loopback()},
+      SocketInetTestParam{V4Loopback(), V4MappedLoopback()},
+      SocketInetTestParam{V4MappedAny(), V4Any()},
+      SocketInetTestParam{V4MappedAny(), V4Loopback()},
+      SocketInetTestParam{V4MappedAny(), V4MappedAny()},
+      SocketInetTestParam{V4MappedAny(), V4MappedLoopback()},
+      SocketInetTestParam{V4MappedLoopback(), V4Any()},
+      SocketInetTestParam{V4MappedLoopback(), V4Loopback()},
+      SocketInetTestParam{V4MappedLoopback(), V4MappedLoopback()},
+
+      // Listeners bound to IN6ADDR_ANY accept all connections.
+      SocketInetTestParam{V6Any(), V4Any()},
+      SocketInetTestParam{V6Any(), V4Loopback()},
+      SocketInetTestParam{V6Any(), V4MappedAny()},
+      SocketInetTestParam{V6Any(), V4MappedLoopback()},
+      SocketInetTestParam{V6Any(), V6Any()},
+      SocketInetTestParam{V6Any(), V6Loopback()},
+
+      // Listeners bound to IN6ADDR_LOOPBACK refuse connections using IPv4
+      // addresses.
+      SocketInetTestParam{V6Loopback(), V6Any()},
+      SocketInetTestParam{V6Loopback(), V6Loopback()});
+}
+
+PosixErrorOr<uint16_t> AddrPort(int family, sockaddr_storage const& addr);
+
+PosixError SetAddrPort(int family, sockaddr_storage* addr, uint16_t port);
+
+// setupTimeWaitClose sets up a socket endpoint in TIME_WAIT state.
+// Callers can choose to perform active close on either ends of the connection
+// and also specify if they want to enabled SO_REUSEADDR.
+void SetupTimeWaitClose(const TestAddress* listener,
+                        const TestAddress* connector, bool reuse,
+                        bool accept_close, sockaddr_storage* listen_addr,
+                        sockaddr_storage* conn_bound_addr);
+
 namespace internal {
 PosixErrorOr<int> TryPortAvailable(int port, AddressFamily family,
                                    SocketType type, bool reuse_addr);

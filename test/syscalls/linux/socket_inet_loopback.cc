@@ -48,45 +48,7 @@ namespace {
 
 using ::testing::Gt;
 
-PosixErrorOr<uint16_t> AddrPort(int family, sockaddr_storage const& addr) {
-  switch (family) {
-    case AF_INET:
-      return static_cast<uint16_t>(
-          reinterpret_cast<sockaddr_in const*>(&addr)->sin_port);
-    case AF_INET6:
-      return static_cast<uint16_t>(
-          reinterpret_cast<sockaddr_in6 const*>(&addr)->sin6_port);
-    default:
-      return PosixError(EINVAL,
-                        absl::StrCat("unknown socket family: ", family));
-  }
-}
-
-PosixError SetAddrPort(int family, sockaddr_storage* addr, uint16_t port) {
-  switch (family) {
-    case AF_INET:
-      reinterpret_cast<sockaddr_in*>(addr)->sin_port = port;
-      return NoError();
-    case AF_INET6:
-      reinterpret_cast<sockaddr_in6*>(addr)->sin6_port = port;
-      return NoError();
-    default:
-      return PosixError(EINVAL,
-                        absl::StrCat("unknown socket family: ", family));
-  }
-}
-
-struct TestParam {
-  TestAddress listener;
-  TestAddress connector;
-};
-
-std::string DescribeTestParam(::testing::TestParamInfo<TestParam> const& info) {
-  return absl::StrCat("Listen", info.param.listener.description, "_Connect",
-                      info.param.connector.description);
-}
-
-using SocketInetLoopbackTest = ::testing::TestWithParam<TestParam>;
+using SocketInetLoopbackTest = ::testing::TestWithParam<SocketInetTestParam>;
 
 TEST(BadSocketPairArgs, ValidateErrForBadCallsToSocketPair) {
   int fd[2] = {};
@@ -543,7 +505,7 @@ TEST_P(SocketInetLoopbackTest, TCPInfoState) {
   ASSERT_THAT(close(conn_fd.release()), SyscallSucceeds());
 }
 
-void TestHangupDuringConnect(const TestParam& param,
+void TestHangupDuringConnect(const SocketInetTestParam& param,
                              void (*hangup)(FileDescriptor&)) {
   TestAddress const& listener = param.listener;
   TestAddress const& connector = param.connector;
@@ -606,7 +568,7 @@ TEST_P(SocketInetLoopbackTest, TCPListenShutdownDuringConnect) {
   });
 }
 
-void TestListenHangupConnectingRead(const TestParam& param,
+void TestListenHangupConnectingRead(const SocketInetTestParam& param,
                                     void (*hangup)(FileDescriptor&)) {
   TestAddress const& listener = param.listener;
   TestAddress const& connector = param.connector;
@@ -694,7 +656,7 @@ TEST_P(SocketInetLoopbackTest, TCPListenShutdownConnectingRead) {
 
 // Test close of a non-blocking connecting socket.
 TEST_P(SocketInetLoopbackTest, TCPNonBlockingConnectClose) {
-  TestParam const& param = GetParam();
+  SocketInetTestParam const& param = GetParam();
   TestAddress const& listener = param.listener;
   TestAddress const& connector = param.connector;
 
@@ -1221,196 +1183,6 @@ TEST_P(SocketInetLoopbackTest, TCPResetAfterClose) {
               SyscallSucceedsWithValue(0));
 }
 
-// setupTimeWaitClose sets up a socket endpoint in TIME_WAIT state.
-// Callers can choose to perform active close on either ends of the connection
-// and also specify if they want to enabled SO_REUSEADDR.
-void setupTimeWaitClose(const TestAddress* listener,
-                        const TestAddress* connector, bool reuse,
-                        bool accept_close, sockaddr_storage* listen_addr,
-                        sockaddr_storage* conn_bound_addr) {
-  // Create the listening socket.
-  FileDescriptor listen_fd = ASSERT_NO_ERRNO_AND_VALUE(
-      Socket(listener->family(), SOCK_STREAM, IPPROTO_TCP));
-  if (reuse) {
-    ASSERT_THAT(setsockopt(listen_fd.get(), SOL_SOCKET, SO_REUSEADDR,
-                           &kSockOptOn, sizeof(kSockOptOn)),
-                SyscallSucceeds());
-  }
-  ASSERT_THAT(
-      bind(listen_fd.get(), AsSockAddr(listen_addr), listener->addr_len),
-      SyscallSucceeds());
-  ASSERT_THAT(listen(listen_fd.get(), SOMAXCONN), SyscallSucceeds());
-
-  // Get the port bound by the listening socket.
-  socklen_t addrlen = listener->addr_len;
-  ASSERT_THAT(getsockname(listen_fd.get(), AsSockAddr(listen_addr), &addrlen),
-              SyscallSucceeds());
-
-  uint16_t const port =
-      ASSERT_NO_ERRNO_AND_VALUE(AddrPort(listener->family(), *listen_addr));
-
-  // Connect to the listening socket.
-  FileDescriptor conn_fd = ASSERT_NO_ERRNO_AND_VALUE(
-      Socket(connector->family(), SOCK_STREAM, IPPROTO_TCP));
-
-  // We disable saves after this point as a S/R causes the netstack seed
-  // to be regenerated which changes what ports/ISN is picked for a given
-  // tuple (src ip,src port, dst ip, dst port). This can cause the final
-  // SYN to use a sequence number that looks like one from the current
-  // connection in TIME_WAIT and will not be accepted causing the test
-  // to timeout.
-  //
-  // TODO(gvisor.dev/issue/940): S/R portSeed/portHint
-  DisableSave ds;
-
-  sockaddr_storage conn_addr = connector->addr;
-  ASSERT_NO_ERRNO(SetAddrPort(connector->family(), &conn_addr, port));
-  ASSERT_THAT(RetryEINTR(connect)(conn_fd.get(), AsSockAddr(&conn_addr),
-                                  connector->addr_len),
-              SyscallSucceeds());
-
-  // Accept the connection.
-  auto accepted =
-      ASSERT_NO_ERRNO_AND_VALUE(Accept(listen_fd.get(), nullptr, nullptr));
-
-  // Get the address/port bound by the connecting socket.
-  socklen_t conn_addrlen = connector->addr_len;
-  ASSERT_THAT(
-      getsockname(conn_fd.get(), AsSockAddr(conn_bound_addr), &conn_addrlen),
-      SyscallSucceeds());
-
-  FileDescriptor active_closefd, passive_closefd;
-  if (accept_close) {
-    active_closefd = std::move(accepted);
-    passive_closefd = std::move(conn_fd);
-  } else {
-    active_closefd = std::move(conn_fd);
-    passive_closefd = std::move(accepted);
-  }
-
-  // shutdown to trigger TIME_WAIT.
-  ASSERT_THAT(shutdown(active_closefd.get(), SHUT_WR), SyscallSucceeds());
-  {
-    constexpr int kTimeout = 10000;
-    pollfd pfd = {
-        .fd = passive_closefd.get(),
-        .events = POLLIN,
-    };
-    ASSERT_THAT(poll(&pfd, 1, kTimeout), SyscallSucceedsWithValue(1));
-    ASSERT_EQ(pfd.revents, POLLIN);
-  }
-  ASSERT_THAT(shutdown(passive_closefd.get(), SHUT_WR), SyscallSucceeds());
-  {
-    constexpr int kTimeout = 10000;
-    constexpr int16_t want_events = POLLHUP;
-    pollfd pfd = {
-        .fd = active_closefd.get(),
-        .events = want_events,
-    };
-    ASSERT_THAT(poll(&pfd, 1, kTimeout), SyscallSucceedsWithValue(1));
-  }
-
-  // This sleep is needed to reduce flake to ensure that the passive-close
-  // ensures the state transitions to CLOSE from LAST_ACK.
-  absl::SleepFor(absl::Seconds(1));
-}
-
-// These tests are disabled under random save as the the restore run
-// results in the stack.Seed() being different which can cause
-// sequence number of final connect to be one that is considered
-// old and can cause the test to be flaky.
-//
-// Test re-binding of client and server bound addresses when the older
-// connection is in TIME_WAIT.
-TEST_P(SocketInetLoopbackTest, TCPPassiveCloseNoTimeWaitTest) {
-  auto const& param = GetParam();
-  sockaddr_storage listen_addr, conn_bound_addr;
-  listen_addr = param.listener.addr;
-  setupTimeWaitClose(&param.listener, &param.connector, false /*reuse*/,
-                     true /*accept_close*/, &listen_addr, &conn_bound_addr);
-
-  // Now bind a new socket and verify that we can immediately rebind the address
-  // bound by the conn_fd as it never entered TIME_WAIT.
-  const FileDescriptor conn_fd = ASSERT_NO_ERRNO_AND_VALUE(
-      Socket(param.connector.family(), SOCK_STREAM, IPPROTO_TCP));
-  ASSERT_THAT(bind(conn_fd.get(), AsSockAddr(&conn_bound_addr),
-                   param.connector.addr_len),
-              SyscallSucceeds());
-
-  FileDescriptor listen_fd = ASSERT_NO_ERRNO_AND_VALUE(
-      Socket(param.listener.family(), SOCK_STREAM, IPPROTO_TCP));
-  ASSERT_THAT(
-      bind(listen_fd.get(), AsSockAddr(&listen_addr), param.listener.addr_len),
-      SyscallFailsWithErrno(EADDRINUSE));
-}
-
-TEST_P(SocketInetLoopbackTest, TCPPassiveCloseNoTimeWaitReuseTest) {
-  auto const& param = GetParam();
-  sockaddr_storage listen_addr, conn_bound_addr;
-  listen_addr = param.listener.addr;
-  setupTimeWaitClose(&param.listener, &param.connector, true /*reuse*/,
-                     true /*accept_close*/, &listen_addr, &conn_bound_addr);
-
-  FileDescriptor listen_fd = ASSERT_NO_ERRNO_AND_VALUE(
-      Socket(param.listener.family(), SOCK_STREAM, IPPROTO_TCP));
-  ASSERT_THAT(setsockopt(listen_fd.get(), SOL_SOCKET, SO_REUSEADDR, &kSockOptOn,
-                         sizeof(kSockOptOn)),
-              SyscallSucceeds());
-  ASSERT_THAT(
-      bind(listen_fd.get(), AsSockAddr(&listen_addr), param.listener.addr_len),
-      SyscallSucceeds());
-  ASSERT_THAT(listen(listen_fd.get(), SOMAXCONN), SyscallSucceeds());
-
-  // Now bind and connect  new socket and verify that we can immediately rebind
-  // the address bound by the conn_fd as it never entered TIME_WAIT.
-  const FileDescriptor conn_fd = ASSERT_NO_ERRNO_AND_VALUE(
-      Socket(param.connector.family(), SOCK_STREAM, IPPROTO_TCP));
-  ASSERT_THAT(setsockopt(conn_fd.get(), SOL_SOCKET, SO_REUSEADDR, &kSockOptOn,
-                         sizeof(kSockOptOn)),
-              SyscallSucceeds());
-  ASSERT_THAT(bind(conn_fd.get(), AsSockAddr(&conn_bound_addr),
-                   param.connector.addr_len),
-              SyscallSucceeds());
-
-  uint16_t const port =
-      ASSERT_NO_ERRNO_AND_VALUE(AddrPort(param.listener.family(), listen_addr));
-  sockaddr_storage conn_addr = param.connector.addr;
-  ASSERT_NO_ERRNO(SetAddrPort(param.connector.family(), &conn_addr, port));
-  ASSERT_THAT(RetryEINTR(connect)(conn_fd.get(), AsSockAddr(&conn_addr),
-                                  param.connector.addr_len),
-              SyscallSucceeds());
-}
-
-TEST_P(SocketInetLoopbackTest, TCPActiveCloseTimeWaitTest) {
-  auto const& param = GetParam();
-  sockaddr_storage listen_addr, conn_bound_addr;
-  listen_addr = param.listener.addr;
-  setupTimeWaitClose(&param.listener, &param.connector, false /*reuse*/,
-                     false /*accept_close*/, &listen_addr, &conn_bound_addr);
-  FileDescriptor conn_fd = ASSERT_NO_ERRNO_AND_VALUE(
-      Socket(param.connector.family(), SOCK_STREAM, IPPROTO_TCP));
-
-  ASSERT_THAT(bind(conn_fd.get(), AsSockAddr(&conn_bound_addr),
-                   param.connector.addr_len),
-              SyscallFailsWithErrno(EADDRINUSE));
-}
-
-TEST_P(SocketInetLoopbackTest, TCPActiveCloseTimeWaitReuseTest) {
-  auto const& param = GetParam();
-  sockaddr_storage listen_addr, conn_bound_addr;
-  listen_addr = param.listener.addr;
-  setupTimeWaitClose(&param.listener, &param.connector, true /*reuse*/,
-                     false /*accept_close*/, &listen_addr, &conn_bound_addr);
-  FileDescriptor conn_fd = ASSERT_NO_ERRNO_AND_VALUE(
-      Socket(param.connector.family(), SOCK_STREAM, IPPROTO_TCP));
-  ASSERT_THAT(setsockopt(conn_fd.get(), SOL_SOCKET, SO_REUSEADDR, &kSockOptOn,
-                         sizeof(kSockOptOn)),
-              SyscallSucceeds());
-  ASSERT_THAT(bind(conn_fd.get(), AsSockAddr(&conn_bound_addr),
-                   param.connector.addr_len),
-              SyscallFailsWithErrno(EADDRINUSE));
-}
-
 TEST_P(SocketInetLoopbackTest, AcceptedInheritsTCPUserTimeout) {
   auto const& param = GetParam();
   TestAddress const& listener = param.listener;
@@ -1722,37 +1494,11 @@ TEST_P(SocketInetLoopbackTest, TCPDeferAcceptTimeout) {
       ASSERT_NO_ERRNO_AND_VALUE(Accept(listen_fd.get(), nullptr, nullptr));
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    All, SocketInetLoopbackTest,
-    ::testing::Values(
-        // Listeners bound to IPv4 addresses refuse connections using IPv6
-        // addresses.
-        TestParam{V4Any(), V4Any()}, TestParam{V4Any(), V4Loopback()},
-        TestParam{V4Any(), V4MappedAny()},
-        TestParam{V4Any(), V4MappedLoopback()},
-        TestParam{V4Loopback(), V4Any()}, TestParam{V4Loopback(), V4Loopback()},
-        TestParam{V4Loopback(), V4MappedLoopback()},
-        TestParam{V4MappedAny(), V4Any()},
-        TestParam{V4MappedAny(), V4Loopback()},
-        TestParam{V4MappedAny(), V4MappedAny()},
-        TestParam{V4MappedAny(), V4MappedLoopback()},
-        TestParam{V4MappedLoopback(), V4Any()},
-        TestParam{V4MappedLoopback(), V4Loopback()},
-        TestParam{V4MappedLoopback(), V4MappedLoopback()},
+INSTANTIATE_TEST_SUITE_P(All, SocketInetLoopbackTest,
+                         SocketInetLoopbackTestValues(),
+                         DescribeSocketInetTestParam);
 
-        // Listeners bound to IN6ADDR_ANY accept all connections.
-        TestParam{V6Any(), V4Any()}, TestParam{V6Any(), V4Loopback()},
-        TestParam{V6Any(), V4MappedAny()},
-        TestParam{V6Any(), V4MappedLoopback()}, TestParam{V6Any(), V6Any()},
-        TestParam{V6Any(), V6Loopback()},
-
-        // Listeners bound to IN6ADDR_LOOPBACK refuse connections using IPv4
-        // addresses.
-        TestParam{V6Loopback(), V6Any()},
-        TestParam{V6Loopback(), V6Loopback()}),
-    DescribeTestParam);
-
-using SocketInetReusePortTest = ::testing::TestWithParam<TestParam>;
+using SocketInetReusePortTest = ::testing::TestWithParam<SocketInetTestParam>;
 
 // TODO(gvisor.dev/issue/940): Remove  when portHint/stack.Seed is
 // saved/restored.
@@ -2086,16 +1832,17 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(
         // Listeners bound to IPv4 addresses refuse connections using IPv6
         // addresses.
-        TestParam{V4Any(), V4Loopback()},
-        TestParam{V4Loopback(), V4MappedLoopback()},
+        SocketInetTestParam{V4Any(), V4Loopback()},
+        SocketInetTestParam{V4Loopback(), V4MappedLoopback()},
 
         // Listeners bound to IN6ADDR_ANY accept all connections.
-        TestParam{V6Any(), V4Loopback()}, TestParam{V6Any(), V6Loopback()},
+        SocketInetTestParam{V6Any(), V4Loopback()},
+        SocketInetTestParam{V6Any(), V6Loopback()},
 
         // Listeners bound to IN6ADDR_LOOPBACK refuse connections using IPv4
         // addresses.
-        TestParam{V6Loopback(), V6Loopback()}),
-    DescribeTestParam);
+        SocketInetTestParam{V6Loopback(), V6Loopback()}),
+    DescribeSocketInetTestParam);
 
 struct ProtocolTestParam {
   std::string description;
