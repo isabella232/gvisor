@@ -78,13 +78,13 @@ const (
 	// we cannot have a negative delay.
 	minimumMaxRtrSolicitationDelay = 0
 
-	// MaxDiscoveredDefaultRouters is the maximum number of discovered
-	// default routers. The stack should stop discovering new routers after
-	// discovering MaxDiscoveredDefaultRouters routers.
+	// MaxDiscoveredOffLinkRoutes is the maximum number of discovered off-link
+	// routes. The stack should stop discovering new off-link routes after
+	// this limit is reached.
 	//
 	// This value MUST be at minimum 2 as per RFC 4861 section 6.3.4, and
 	// SHOULD be more.
-	MaxDiscoveredDefaultRouters = 10
+	MaxDiscoveredOffLinkRoutes = 10
 
 	// MaxDiscoveredOnLinkPrefixes is the maximum number of discovered
 	// on-link prefixes. The stack should stop discovering new on-link
@@ -214,28 +214,23 @@ type NDPDispatcher interface {
 	// is also not permitted to call into the stack.
 	OnDuplicateAddressDetectionResult(tcpip.NICID, tcpip.Address, stack.DADResult)
 
-	// OnDefaultRouterDiscovered is called when a new default router is
-	// discovered. Implementations must return true if the newly discovered
-	// router should be remembered.
+	// OnOffLinkRouteUpdate is called when an off-link route is updated.
 	//
 	// This function is not permitted to block indefinitely. This function
 	// is also not permitted to call into the stack.
-	OnDefaultRouterDiscovered(tcpip.NICID, tcpip.Address) bool
+	OnOffLinkRouteUpdate(tcpip.NICID, tcpip.Subnet, tcpip.Address, header.NDPRoutePreference)
 
-	// OnDefaultRouterInvalidated is called when a discovered default router that
-	// was remembered is invalidated.
+	// OnOffLinkRouteInvalidated is called when an off-link route is invalidated.
 	//
 	// This function is not permitted to block indefinitely. This function
 	// is also not permitted to call into the stack.
-	OnDefaultRouterInvalidated(tcpip.NICID, tcpip.Address)
+	OnOffLinkRouteInvalidated(tcpip.NICID, tcpip.Subnet, tcpip.Address)
 
 	// OnOnLinkPrefixDiscovered is called when a new on-link prefix is discovered.
-	// Implementations must return true if the newly discovered on-link prefix
-	// should be remembered.
 	//
 	// This function is not permitted to block indefinitely. This function
 	// is also not permitted to call into the stack.
-	OnOnLinkPrefixDiscovered(tcpip.NICID, tcpip.Subnet) bool
+	OnOnLinkPrefixDiscovered(tcpip.NICID, tcpip.Subnet)
 
 	// OnOnLinkPrefixInvalidated is called when a discovered on-link prefix that
 	// was remembered is invalidated.
@@ -245,13 +240,11 @@ type NDPDispatcher interface {
 	OnOnLinkPrefixInvalidated(tcpip.NICID, tcpip.Subnet)
 
 	// OnAutoGenAddress is called when a new prefix with its autonomous address-
-	// configuration flag set is received and SLAAC was performed. Implementations
-	// may prevent the stack from assigning the address to the NIC by returning
-	// false.
+	// configuration flag set is received and SLAAC was performed.
 	//
 	// This function is not permitted to block indefinitely. It must not
 	// call functions on the stack itself.
-	OnAutoGenAddress(tcpip.NICID, tcpip.AddressWithPrefix) bool
+	OnAutoGenAddress(tcpip.NICID, tcpip.AddressWithPrefix)
 
 	// OnAutoGenAddressDeprecated is called when an auto-generated address (SLAAC)
 	// is deprecated, but is still considered valid. Note, if an address is
@@ -469,6 +462,11 @@ type timer struct {
 	timer tcpip.Timer
 }
 
+type offLinkRoute struct {
+	dest   tcpip.Subnet
+	router tcpip.Address
+}
+
 // ndpState is the per-Interface NDP state.
 type ndpState struct {
 	// Do not allow overwriting this state.
@@ -483,8 +481,8 @@ type ndpState struct {
 	// The DAD timers to send the next NS message, or resolve the address.
 	dad ip.DAD
 
-	// The default routers discovered through Router Advertisements.
-	defaultRouters map[tcpip.Address]defaultRouterState
+	// The off-link routes discovered through Router Advertisements.
+	offLinkRoutes map[offLinkRoute]offLinkRouteState
 
 	// rtrSolicitTimer is the timer used to send the next router solicitation
 	// message.
@@ -512,10 +510,12 @@ type ndpState struct {
 	temporaryAddressDesyncFactor time.Duration
 }
 
-// defaultRouterState holds data associated with a default router discovered by
+// offLinkRouteState holds data associated with an off-link route discovered by
 // a Router Advertisement (RA).
-type defaultRouterState struct {
-	// Job to invalidate the default router.
+type offLinkRouteState struct {
+	prf header.NDPRoutePreference
+
+	// Job to invalidate the route.
 	//
 	// Must not be nil.
 	invalidationJob *tcpip.Job
@@ -733,30 +733,22 @@ func (ndp *ndpState) handleRA(ip tcpip.Address, ra header.NDPRouterAdvert) {
 
 	// Is the IPv6 endpoint configured to discover default routers?
 	if ndp.configs.DiscoverDefaultRouters {
-		rtr, ok := ndp.defaultRouters[ip]
-		rl := ra.RouterLifetime()
-		switch {
-		case !ok && rl != 0:
-			// This is a new default router we are discovering.
+		prf := ra.DefaultRouterPreference()
+		if prf == header.ReservedRoutePreference {
+			// As per RFC 4191 section 2.2,
 			//
-			// Only remember it if we currently know about less than
-			// MaxDiscoveredDefaultRouters routers.
-			if len(ndp.defaultRouters) < MaxDiscoveredDefaultRouters {
-				ndp.rememberDefaultRouter(ip, rl)
-			}
-
-		case ok && rl != 0:
-			// This is an already discovered default router. Update
-			// the invalidation job.
-			rtr.invalidationJob.Cancel()
-			rtr.invalidationJob.Schedule(rl)
-			ndp.defaultRouters[ip] = rtr
-
-		case ok && rl == 0:
-			// We know about the router but it is no longer to be
-			// used as a default router so invalidate it.
-			ndp.invalidateDefaultRouter(ip)
+			//   Prf (Default Router Preference)
+			//
+			//     If the Reserved (10) value is received, the receiver MUST treat the
+			//     value as if it were (00).
+			//
+			// Note that the value 00 is the medium (default) router preference value.
+			prf = header.MediumRoutePreference
 		}
+
+		// We represent default routers with a default (off-link) route through the
+		// router.
+		ndp.handleOffLinkRoute(offLinkRoute{dest: header.IPv6EmptySubnet, router: ip}, ra.RouterLifetime(), prf)
 	}
 
 	// TODO(b/141556115): Do (RetransTimer, ReachableTime)) Parameter
@@ -814,55 +806,70 @@ func (ndp *ndpState) handleRA(ip tcpip.Address, ra header.NDPRouterAdvert) {
 	}
 }
 
-// invalidateDefaultRouter invalidates a discovered default router.
+// invalidateOffLinkRoute invalidates a discovered off-link route.
 //
 // The IPv6 endpoint that ndp belongs to MUST be locked.
-func (ndp *ndpState) invalidateDefaultRouter(ip tcpip.Address) {
-	rtr, ok := ndp.defaultRouters[ip]
-
-	// Is the router still discovered?
+func (ndp *ndpState) invalidateOffLinkRoute(route offLinkRoute) {
+	state, ok := ndp.offLinkRoutes[route]
 	if !ok {
-		// ...Nope, do nothing further.
 		return
 	}
 
-	rtr.invalidationJob.Cancel()
-	delete(ndp.defaultRouters, ip)
+	state.invalidationJob.Cancel()
+	delete(ndp.offLinkRoutes, route)
 
-	// Let the integrator know a discovered default router is invalidated.
+	// Let the integrator know a discovered off-link route is invalidated.
 	if ndpDisp := ndp.ep.protocol.options.NDPDisp; ndpDisp != nil {
-		ndpDisp.OnDefaultRouterInvalidated(ndp.ep.nic.ID(), ip)
+		ndpDisp.OnOffLinkRouteInvalidated(ndp.ep.nic.ID(), route.dest, route.router)
 	}
 }
 
-// rememberDefaultRouter remembers a newly discovered default router with IPv6
-// link-local address ip with lifetime rl.
-//
-// The router identified by ip MUST NOT already be known by the IPv6 endpoint.
-//
-// The IPv6 endpoint that ndp belongs to MUST be locked.
-func (ndp *ndpState) rememberDefaultRouter(ip tcpip.Address, rl time.Duration) {
+func (ndp *ndpState) handleOffLinkRoute(route offLinkRoute, lifetime time.Duration, prf header.NDPRoutePreference) {
 	ndpDisp := ndp.ep.protocol.options.NDPDisp
 	if ndpDisp == nil {
 		return
 	}
 
-	// Inform the integrator when we discovered a default router.
-	if !ndpDisp.OnDefaultRouterDiscovered(ndp.ep.nic.ID(), ip) {
-		// Informed by the integrator to not remember the router, do
-		// nothing further.
-		return
+	state, ok := ndp.offLinkRoutes[route]
+	switch {
+	case !ok && lifetime != 0:
+		// This is a new route we are discovering.
+		//
+		// Only remember it if we currently know about less than
+		// MaxDiscoveredOffLinkRoutes routers.
+		if len(ndp.offLinkRoutes) < MaxDiscoveredOffLinkRoutes {
+			// Inform the integrator when we discovered an off-link route.
+			ndpDisp.OnOffLinkRouteUpdate(ndp.ep.nic.ID(), route.dest, route.router, prf)
+
+			state := offLinkRouteState{
+				prf: prf,
+				invalidationJob: ndp.ep.protocol.stack.NewJob(&ndp.ep.mu, func() {
+					ndp.invalidateOffLinkRoute(route)
+				}),
+			}
+
+			state.invalidationJob.Schedule(lifetime)
+
+			ndp.offLinkRoutes[route] = state
+		}
+
+	case ok && lifetime != 0:
+		// This is an already discovered off-link route. Update the lifetime.
+		state.invalidationJob.Cancel()
+		state.invalidationJob.Schedule(lifetime)
+
+		if prf != state.prf {
+			state.prf = prf
+
+			// Inform the integrator about route preference updates.
+			ndpDisp.OnOffLinkRouteUpdate(ndp.ep.nic.ID(), route.dest, route.router, prf)
+		}
+
+		ndp.offLinkRoutes[route] = state
+
+	case ok && lifetime == 0:
+		ndp.invalidateOffLinkRoute(route)
 	}
-
-	state := defaultRouterState{
-		invalidationJob: ndp.ep.protocol.stack.NewJob(&ndp.ep.mu, func() {
-			ndp.invalidateDefaultRouter(ip)
-		}),
-	}
-
-	state.invalidationJob.Schedule(rl)
-
-	ndp.defaultRouters[ip] = state
 }
 
 // rememberOnLinkPrefix remembers a newly discovered on-link prefix with IPv6
@@ -878,11 +885,7 @@ func (ndp *ndpState) rememberOnLinkPrefix(prefix tcpip.Subnet, l time.Duration) 
 	}
 
 	// Inform the integrator when we discovered an on-link prefix.
-	if !ndpDisp.OnOnLinkPrefixDiscovered(ndp.ep.nic.ID(), prefix) {
-		// Informed by the integrator to not remember the prefix, do
-		// nothing further.
-		return
-	}
+	ndpDisp.OnOnLinkPrefixDiscovered(ndp.ep.nic.ID(), prefix)
 
 	state := onLinkPrefixState{
 		invalidationJob: ndp.ep.protocol.stack.NewJob(&ndp.ep.mu, func() {
@@ -1096,15 +1099,12 @@ func (ndp *ndpState) addAndAcquireSLAACAddr(addr tcpip.AddressWithPrefix, config
 		return nil
 	}
 
-	if !ndpDisp.OnAutoGenAddress(ndp.ep.nic.ID(), addr) {
-		// Informed by the integrator not to add the address.
-		return nil
-	}
-
 	addressEndpoint, err := ndp.ep.addAndAcquirePermanentAddressLocked(addr, stack.FirstPrimaryEndpoint, configType, deprecated)
 	if err != nil {
 		panic(fmt.Sprintf("ndp: error when adding SLAAC address %+v: %s", addr, err))
 	}
+
+	ndpDisp.OnAutoGenAddress(ndp.ep.nic.ID(), addr)
 
 	return addressEndpoint
 }
@@ -1679,12 +1679,12 @@ func (ndp *ndpState) cleanupState() {
 		panic(fmt.Sprintf("ndp: still have discovered on-link prefixes after cleaning up; found = %d", got))
 	}
 
-	for router := range ndp.defaultRouters {
-		ndp.invalidateDefaultRouter(router)
+	for route := range ndp.offLinkRoutes {
+		ndp.invalidateOffLinkRoute(route)
 	}
 
-	if got := len(ndp.defaultRouters); got != 0 {
-		panic(fmt.Sprintf("ndp: still have discovered default routers after cleaning up; found = %d", got))
+	if got := len(ndp.offLinkRoutes); got != 0 {
+		panic(fmt.Sprintf("ndp: still have discovered off-link routes after cleaning up; found = %d", got))
 	}
 
 	ndp.dhcpv6Configuration = 0
@@ -1847,14 +1847,14 @@ func (ndp *ndpState) stopSolicitingRouters() {
 }
 
 func (ndp *ndpState) init(ep *endpoint, dadOptions ip.DADOptions) {
-	if ndp.defaultRouters != nil {
+	if ndp.offLinkRoutes != nil {
 		panic("attempted to initialize NDP state twice")
 	}
 
 	ndp.ep = ep
 	ndp.configs = ep.protocol.options.NDPConfigs
 	ndp.dad.Init(&ndp.ep.mu, ep.protocol.options.DADConfigs, dadOptions)
-	ndp.defaultRouters = make(map[tcpip.Address]defaultRouterState)
+	ndp.offLinkRoutes = make(map[offLinkRoute]offLinkRouteState)
 	ndp.onLinkPrefixes = make(map[tcpip.Subnet]onLinkPrefixState)
 	ndp.slaacPrefixes = make(map[tcpip.Subnet]slaacPrefixState)
 

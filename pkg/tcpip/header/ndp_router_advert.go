@@ -19,6 +19,32 @@ import (
 	"time"
 )
 
+// NDPRoutePreference is the preference values for default routers or
+// more-specific routes, as defined by RFC 4191 section 2.1.
+type NDPRoutePreference uint8
+
+const (
+	// HighRoutePreference indicates a high preference, as per
+	// RFC 4191 section 2.1.
+	HighRoutePreference NDPRoutePreference = 1
+
+	// MediumRoutePreference indicates a high preference, as per
+	// RFC 4191 section 2.1.
+	//
+	// This is the default preference value.
+	MediumRoutePreference = 0
+
+	// LowRoutePreference indicates a low preference, as per
+	// RFC 4191 section 2.1.
+	LowRoutePreference = 3
+
+	// ReservedRoutePreference is a reserved preference value, as per
+	// RFC 4191 section 2.1.
+	//
+	// It MUST NOT be sent.
+	ReservedRoutePreference = 2
+)
+
 // NDPRouterAdvert is an NDP Router Advertisement message. It will only contain
 // the body of an ICMPv6 packet.
 //
@@ -46,6 +72,14 @@ const (
 	// ndpRAOtherConfFlagMask is the mask of the Other Configuration flag
 	// within the bit-field/flags byte of an NDPRouterAdvert.
 	ndpRAOtherConfFlagMask = (1 << 6)
+
+	// ndpDefaultRouterPreferenceShift is the shift of the Prf (Default Router
+	// Preference) field within the flags byte of an NDPRouterAdvert.
+	ndpDefaultRouterPreferenceShift = 3
+
+	// ndpDefaultRouterPreferenceMask is the mask of the Prf (Default Router
+	// Preference) field within the flags byte of an NDPRouterAdvert.
+	ndpDefaultRouterPreferenceMask = (3 << ndpDefaultRouterPreferenceShift)
 
 	// ndpRARouterLifetimeOffset is the start of the 2-byte Router Lifetime
 	// field within an NDPRouterAdvert.
@@ -78,6 +112,11 @@ func (b NDPRouterAdvert) ManagedAddrConfFlag() bool {
 // OtherConfFlag returns the value of the Other Configuration flag.
 func (b NDPRouterAdvert) OtherConfFlag() bool {
 	return b[ndpRAFlagsOffset]&ndpRAOtherConfFlagMask != 0
+}
+
+// DefaultRouterPreference returns the Default Router Preference field.
+func (b NDPRouterAdvert) DefaultRouterPreference() NDPRoutePreference {
+	return NDPRoutePreference((b[ndpRAFlagsOffset] & ndpDefaultRouterPreferenceMask) >> ndpDefaultRouterPreferenceShift)
 }
 
 // RouterLifetime returns the lifetime associated with the default router. A

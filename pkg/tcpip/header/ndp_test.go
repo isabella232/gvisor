@@ -126,36 +126,60 @@ func TestNDPNeighborAdvert(t *testing.T) {
 }
 
 func TestNDPRouterAdvert(t *testing.T) {
+	const hopLimit = 64
+	const managedFlag = true
+	const otherConfFlag = true
+	const prf = LowRoutePreference
+	const routerLifetimeS = 258
+	const reachableTimeMS = 78492
+	const retransTimerMS = 13213
+
+	flags := uint8(0)
+	if managedFlag {
+		flags |= 1 << 7
+	}
+	if otherConfFlag {
+		flags |= 1 << 6
+	}
+	flags |= uint8(prf) << 3
+
 	b := []byte{
-		64, 128, 1, 2,
+		hopLimit, flags, 1, 2,
 		3, 4, 5, 6,
 		7, 8, 9, 10,
 	}
+	binary.BigEndian.PutUint16(b[2:], routerLifetimeS)
+	binary.BigEndian.PutUint32(b[4:], reachableTimeMS)
+	binary.BigEndian.PutUint32(b[8:], retransTimerMS)
 
 	ra := NDPRouterAdvert(b)
 
-	if got := ra.CurrHopLimit(); got != 64 {
-		t.Errorf("got ra.CurrHopLimit = %d, want = 64", got)
+	if got := ra.CurrHopLimit(); got != hopLimit {
+		t.Errorf("got ra.CurrHopLimit() = %d, want = %d", got, hopLimit)
 	}
 
-	if got := ra.ManagedAddrConfFlag(); !got {
-		t.Errorf("got ManagedAddrConfFlag = false, want = true")
+	if got := ra.ManagedAddrConfFlag(); got != managedFlag {
+		t.Errorf("got ManagedAddrConfFlag() = %t, want = %t", got, managedFlag)
 	}
 
-	if got := ra.OtherConfFlag(); got {
-		t.Errorf("got OtherConfFlag = true, want = false")
+	if got := ra.OtherConfFlag(); got != otherConfFlag {
+		t.Errorf("got OtherConfFlag() = %t, want = %t", got, otherConfFlag)
 	}
 
-	if got, want := ra.RouterLifetime(), time.Second*258; got != want {
-		t.Errorf("got ra.RouterLifetime = %d, want = %d", got, want)
+	if got := ra.DefaultRouterPreference(); got != prf {
+		t.Errorf("got DefaultRouterPreference() = %d, want = %d", got, prf)
 	}
 
-	if got, want := ra.ReachableTime(), time.Millisecond*50595078; got != want {
-		t.Errorf("got ra.ReachableTime = %d, want = %d", got, want)
+	if got, want := ra.RouterLifetime(), time.Second*routerLifetimeS; got != want {
+		t.Errorf("got ra.RouterLifetime() = %d, want = %d", got, want)
 	}
 
-	if got, want := ra.RetransTimer(), time.Millisecond*117967114; got != want {
-		t.Errorf("got ra.RetransTimer = %d, want = %d", got, want)
+	if got, want := ra.ReachableTime(), time.Millisecond*reachableTimeMS; got != want {
+		t.Errorf("got ra.ReachableTime() = %d, want = %d", got, want)
+	}
+
+	if got, want := ra.RetransTimer(), time.Millisecond*retransTimerMS; got != want {
+		t.Errorf("got ra.RetransTimer() = %d, want = %d", got, want)
 	}
 }
 
