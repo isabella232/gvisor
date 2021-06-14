@@ -16,6 +16,7 @@ package stack
 
 import (
 	"fmt"
+
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/hash/jenkins"
@@ -215,10 +216,18 @@ func (epsByNIC *endpointsByNIC) registerEndpoint(d *transportDemuxer, netProto t
 			netProto:   netProto,
 			transProto: transProto,
 		}
-		epsByNIC.endpoints[bindToDevice] = multiPortEp
 	}
 
-	return multiPortEp.singleRegisterEndpoint(t, flags)
+	err := multiPortEp.singleRegisterEndpoint(t, flags)
+	if err != nil {
+		return err
+	}
+	// Only add this newly created multiportEndpoint if the singleRegisterEndpoint
+	// succeeded.
+	if !ok {
+		epsByNIC.endpoints[bindToDevice] = multiPortEp
+	}
+	return nil
 }
 
 func (epsByNIC *endpointsByNIC) checkEndpoint(flags ports.Flags, bindToDevice tcpip.NICID) tcpip.Error {
@@ -475,10 +484,17 @@ func (d *transportDemuxer) singleRegisterEndpoint(netProto tcpip.NetworkProtocol
 			endpoints: make(map[tcpip.NICID]*multiPortEndpoint),
 			seed:      d.stack.Seed(),
 		}
-		eps.endpoints[id] = epsByNIC
 	}
 
-	return epsByNIC.registerEndpoint(d, netProto, protocol, ep, flags, bindToDevice)
+	err := epsByNIC.registerEndpoint(d, netProto, protocol, ep, flags, bindToDevice)
+	if err != nil {
+		return err
+	}
+	// Only add this newly created epsByNIC if registerEndpoint succeeded.
+	if !ok {
+		eps.endpoints[id] = epsByNIC
+	}
+	return nil
 }
 
 func (d *transportDemuxer) singleCheckEndpoint(netProto tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, flags ports.Flags, bindToDevice tcpip.NICID) tcpip.Error {
