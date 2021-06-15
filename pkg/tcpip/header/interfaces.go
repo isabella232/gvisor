@@ -53,6 +53,31 @@ type Transport interface {
 	Payload() []byte
 }
 
+// ChecksummableTransport is a checksummable Transport.
+type ChecksummableTransport interface {
+	Transport
+
+	// UpdateSourcePortAndMaybeChecksum updates the source port and updates
+	// the checksum if requested.
+	//
+	// The checksum must be a fully calculated checksum.
+	UpdateSourcePortAndMaybeChecksum(uint16, bool)
+
+	// UpdateDestinationPortAndMaybeChecksum updates the destination port and
+	// updates the checksum if requested.
+	//
+	// The checksum must be a fully calculated checksum.
+	UpdateDestinationPortAndMaybeChecksum(uint16, bool)
+
+	// UpdateChecksumPseudoHeaderAddress updates the checksum to reflect an
+	// updated address in the pseudo header.
+	//
+	// If fullChecksum is true, the checksum field is assumed to hold a fully
+	// calculated checksum. Otherwise, it is assumed to hold a partially
+	// calculated checksum which only reflects the pseudo header.
+	UpdateChecksumPseudoHeaderAddress(old, new tcpip.Address, fullChecksum bool)
+}
+
 // Network offers generic methods to query and/or update the fields of the
 // header of a network protocol buffer.
 type Network interface {
@@ -89,4 +114,17 @@ type Network interface {
 
 	// SetTOS sets the values of the "type of service" and "flow label" fields.
 	SetTOS(t uint8, l uint32)
+}
+
+// ChecksummableNetwork is a Network that supports checksumming.
+type ChecksummableNetwork interface {
+	Network
+
+	// UpdateSourceAddressAndChecksum updates the source address and updates the
+	// checksum to reflect the new address.
+	UpdateSourceAddressAndChecksum(tcpip.Address)
+
+	// UpdateDestinationAddressAndChecksum updates the destination address and
+	// updates the checksum to reflect the new address.
+	UpdateDestinationAddressAndChecksum(tcpip.Address)
 }

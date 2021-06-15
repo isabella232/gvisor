@@ -133,29 +133,31 @@ func (rt *RedirectTarget) Action(pkt *PacketBuffer, ct *ConnTrack, hook Hook, r 
 	switch protocol := pkt.TransportProtocolNumber; protocol {
 	case header.UDPProtocolNumber:
 		udpHeader := header.UDP(pkt.TransportHeader().View())
-		udpHeader.SetDestinationPort(rt.Port)
 
-		// Calculate UDP checksum and set it.
 		if hook == Output {
-			udpHeader.SetChecksum(0)
 			netHeader := pkt.Network()
-			netHeader.SetDestinationAddress(address)
 
 			// Only calculate the checksum if offloading isn't supported.
-			if r.RequiresTXTransportChecksum() {
-				length := uint16(pkt.Size()) - uint16(len(pkt.NetworkHeader().View()))
-				xsum := header.PseudoHeaderChecksum(protocol, netHeader.SourceAddress(), netHeader.DestinationAddress(), length)
-				xsum = header.ChecksumCombine(xsum, pkt.Data().AsRange().Checksum())
-				udpHeader.SetChecksum(^udpHeader.CalculateChecksum(xsum))
+			requiresChecksum := r.RequiresTXTransportChecksum()
+			updateTransportFields(
+				udpHeader,
+				false,
+				requiresChecksum,
+				requiresChecksum,
+				rt.Port,
+				netHeader.DestinationAddress(),
+				address,
+			)
+
+			if checksummableNetHeader, ok := netHeader.(header.ChecksummableNetwork); ok {
+				checksummableNetHeader.UpdateDestinationAddressAndChecksum(address)
+			} else {
+				netHeader.SetDestinationAddress(address)
 			}
+		} else {
+			udpHeader.SetDestinationPort(rt.Port)
 		}
 
-		// After modification, IPv4 packets need a valid checksum.
-		if pkt.NetworkProtocolNumber == header.IPv4ProtocolNumber {
-			netHeader := header.IPv4(pkt.NetworkHeader().View())
-			netHeader.SetChecksum(0)
-			netHeader.SetChecksum(^netHeader.CalculateChecksum())
-		}
 		pkt.NatDone = true
 	case header.TCPProtocolNumber:
 		if ct == nil {
@@ -215,24 +217,24 @@ func (st *SNATTarget) Action(pkt *PacketBuffer, ct *ConnTrack, hook Hook, r *Rou
 	switch protocol := pkt.TransportProtocolNumber; protocol {
 	case header.UDPProtocolNumber:
 		udpHeader := header.UDP(pkt.TransportHeader().View())
-		udpHeader.SetChecksum(0)
-		udpHeader.SetSourcePort(st.Port)
 		netHeader := pkt.Network()
-		netHeader.SetSourceAddress(st.Addr)
 
 		// Only calculate the checksum if offloading isn't supported.
-		if r.RequiresTXTransportChecksum() {
-			length := uint16(pkt.Size()) - uint16(len(pkt.NetworkHeader().View()))
-			xsum := header.PseudoHeaderChecksum(protocol, netHeader.SourceAddress(), netHeader.DestinationAddress(), length)
-			xsum = header.ChecksumCombine(xsum, pkt.Data().AsRange().Checksum())
-			udpHeader.SetChecksum(^udpHeader.CalculateChecksum(xsum))
-		}
+		requiresChecksum := r.RequiresTXTransportChecksum()
+		updateTransportFields(
+			udpHeader,
+			true,
+			requiresChecksum,
+			requiresChecksum,
+			st.Port,
+			netHeader.SourceAddress(),
+			st.Addr,
+		)
 
-		// After modification, IPv4 packets need a valid checksum.
-		if pkt.NetworkProtocolNumber == header.IPv4ProtocolNumber {
-			netHeader := header.IPv4(pkt.NetworkHeader().View())
-			netHeader.SetChecksum(0)
-			netHeader.SetChecksum(^netHeader.CalculateChecksum())
+		if checksummableNetHeader, ok := netHeader.(header.ChecksummableNetwork); ok {
+			checksummableNetHeader.UpdateSourceAddressAndChecksum(st.Addr)
+		} else {
+			netHeader.SetSourceAddress(st.Addr)
 		}
 		pkt.NatDone = true
 	case header.TCPProtocolNumber:
@@ -251,4 +253,16 @@ func (st *SNATTarget) Action(pkt *PacketBuffer, ct *ConnTrack, hook Hook, r *Rou
 	}
 
 	return RuleAccept, 0
+}
+
+func updateTransportFields(t header.ChecksummableTransport, updateSrcFields, fullChecksum, updatePseudoHeader bool, newPort uint16, oldAddr, newAddr tcpip.Address) {
+	if updateSrcFields {
+		t.UpdateSourcePortAndMaybeChecksum(newPort, fullChecksum)
+	} else {
+		t.UpdateDestinationPortAndMaybeChecksum(newPort, fullChecksum)
+	}
+
+	if updatePseudoHeader {
+		t.UpdateChecksumPseudoHeaderAddress(oldAddr, newAddr, fullChecksum)
+	}
 }

@@ -390,6 +390,39 @@ func (b TCP) EncodePartial(partialChecksum, length uint16, seqnum, acknum uint32
 	b.SetChecksum(^checksum)
 }
 
+// UpdateSourcePortAndMaybeChecksum implements ChecksummableTransport.
+func (b TCP) UpdateSourcePortAndMaybeChecksum(new uint16, updateChecksum bool) {
+	old := b.SourcePort()
+	b.SetSourcePort(new)
+	if updateChecksum {
+		b.SetChecksum(^checksumUpdate2ByteAlignedUint16(^b.Checksum(), old, new))
+	}
+}
+
+// UpdateDestinationPortAndMaybeChecksum implements ChecksummableTransport.
+func (b TCP) UpdateDestinationPortAndMaybeChecksum(new uint16, updateChecksum bool) {
+	old := b.DestinationPort()
+	b.SetDestinationPort(new)
+	if updateChecksum {
+		b.SetChecksum(^checksumUpdate2ByteAlignedUint16(^b.Checksum(), old, new))
+	}
+}
+
+// UpdateChecksumPseudoHeaderAddress implements ChecksummableTransport.
+func (b TCP) UpdateChecksumPseudoHeaderAddress(old, new tcpip.Address, fullChecksum bool) {
+	xsum := b.Checksum()
+	if fullChecksum {
+		xsum = ^xsum
+	}
+
+	xsum = checksumUpdate2ByteAlignedAddress(xsum, old, new)
+	if fullChecksum {
+		xsum = ^xsum
+	}
+
+	b.SetChecksum(xsum)
+}
+
 // ParseSynOptions parses the options received in a SYN segment and returns the
 // relevant ones. opts should point to the option part of the TCP header.
 func ParseSynOptions(opts []byte, isAck bool) TCPSynOptions {
