@@ -16,6 +16,7 @@ package stack
 
 import (
 	"fmt"
+
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/hash/jenkins"
@@ -572,9 +573,22 @@ func (d *transportDemuxer) deliverPacket(protocol tcpip.TransportProtocolNumber,
 
 // deliverRawPacket attempts to deliver the given packet and returns whether it
 // was delivered successfully.
-func (d *transportDemuxer) deliverRawPacket(protocol tcpip.TransportProtocolNumber, pkt *PacketBuffer) bool {
+func (d *transportDemuxer) deliverRawPacket(protocol tcpip.TransportProtocolNumber, minPacketSize int, pkt *PacketBuffer) bool {
 	eps, ok := d.protocol[protocolIDs{pkt.NetworkProtocolNumber, protocol}]
 	if !ok {
+		return false
+	}
+
+	// The packet must have at least the minumum transport header size.
+	var tHdrSize int
+	if tHdr := pkt.TransportHeader().View(); tHdr.IsEmpty() {
+		// If the transport header is unpopulated, it may be unparsed inside of
+		// pkt.Data.
+		tHdrSize = pkt.Data().Size()
+	} else {
+		tHdrSize = tHdr.Size()
+	}
+	if tHdrSize < minPacketSize {
 		return false
 	}
 
