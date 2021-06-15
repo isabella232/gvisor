@@ -21,7 +21,6 @@ import (
 
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/log"
-	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/time"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
@@ -110,7 +109,7 @@ type LoadOpts struct {
 }
 
 // Load loads the given kernel, setting the provided platform and stack.
-func (opts LoadOpts) Load(ctx context.Context, k *kernel.Kernel, n inet.Stack, clocks time.Clocks, vfsOpts *vfs.CompleteRestoreOptions) error {
+func (opts LoadOpts) Load(ctx context.Context, k *kernel.Kernel, clocks time.Clocks, vfsOpts *vfs.CompleteRestoreOptions, netFactory kernel.StackFactory) error {
 	// Open the file.
 	r, m, err := statefile.NewReader(opts.Source, opts.Key)
 	if err != nil {
@@ -120,5 +119,5 @@ func (opts LoadOpts) Load(ctx context.Context, k *kernel.Kernel, n inet.Stack, c
 	previousMetadata = m
 
 	// Restore the Kernel object graph.
-	return k.LoadFrom(ctx, r, n, clocks, vfsOpts)
+	return k.LoadFrom(ctx, r, netFactory, clocks, vfsOpts)
 }

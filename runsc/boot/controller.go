@@ -26,12 +26,14 @@ import (
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/control"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
+	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/socket/netstack"
 	"gvisor.dev/gvisor/pkg/sentry/state"
 	"gvisor.dev/gvisor/pkg/sentry/time"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/urpc"
 	"gvisor.dev/gvisor/runsc/boot/pprof"
@@ -439,7 +441,9 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 
 	// Load the state.
 	loadOpts := state.LoadOpts{Source: specFile}
-	if err := loadOpts.Load(ctx, k, networkStack, time.NewCalibratedClocks(), &vfs.CompleteRestoreOptions{}); err != nil {
+	if err := loadOpts.Load(ctx, k, time.NewCalibratedClocks(), &vfs.CompleteRestoreOptions{}, func(tcpip.Clock) (inet.Stack, error) {
+		return networkStack, nil
+	}); err != nil {
 		return err
 	}
 

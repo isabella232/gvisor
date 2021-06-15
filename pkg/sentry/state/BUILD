@@ -14,7 +14,6 @@ go_library(
         "//pkg/abi/linux",
         "//pkg/context",
         "//pkg/log",
-        "//pkg/sentry/inet",
         "//pkg/sentry/kernel",
         "//pkg/sentry/time",
         "//pkg/sentry/vfs",
